@@ -1,5 +1,11 @@
 # dsh-agent-reflection
 
+
+<p align="center">
+  <a href="https://github.com/jonah791/dsh-agent-reflection"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="version"></a>
+  <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
+  <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
+</p>
 > 每日反思插件：固定时刻触发 6 维进化棱镜自审。
 > DeepSeek Harness 自研插件 · v0.1.1
 
