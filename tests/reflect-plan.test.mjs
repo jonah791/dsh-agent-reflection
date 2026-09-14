@@ -1,0 +1,179 @@
+/**
+ * tests/reflect-plan.test.mjs — 每日反思纯决策层的回归测试（跑 lib 产物，与运行时同源）。
+ *
+ * 覆盖：主路径（真实常数）／边界（等于触发时刻即触发）／退化与失败路径（脏数据、缺失字段、
+ * 空输入必须**不抛**且行为保守）／短路语义（对话中判定的 thunk 不得被提前调用）。
+ * 跑法：node --test tests/reflect-plan.test.mjs（先 tsc -p tsconfig.json 构建）
+ */
+import { test } from 'node:test'
+import assert from 'node:assert/strict'
+import {
+  DEFAULT_STATE,
+  buildEmotionSummary,
+  buildEmotionSummaryFromRaw,
+  computeHitRate,
+  decideByTime,
+  isInterrupted,
+  localDateStr,
+  parseState,
+  shouldSkipForConversation,
+} from '../lib/reflect-plan.js'
+
+const at = (h, m, s = 0) => new Date(2026, 8, 14, h, m, s) // 本地时间 2026-09-14（月 0 基）
+
+// ── 主路径：真实常数 ────────────────────────────────────────────────
+test('localDateStr: 用本地时间而非 UTC（东八区凌晨不错位一天）', () => {
+  assert.equal(localDateStr(new Date(2026, 0, 1, 0, 30)), '2026-01-01')
+  assert.equal(localDateStr(new Date(2026, 8, 14, 23, 59)), '2026-09-14')
+  assert.equal(localDateStr(new Date(2026, 11, 31, 12, 0)), '2026-12-31')
+})
+
+test('decideByTime: 到点即触发（时刻相等算到点）', () => {
+  const v = decideByTime({ enabled: true, hour: 0, minute: 0, force: false, now: at(0, 0), state: { ...DEFAULT_STATE } })
+  assert.equal(v.action, 'trigger')
+  const edge = decideByTime({ enabled: true, hour: 23, minute: 59, force: false, now: at(23, 59), state: { ...DEFAULT_STATE } })
+  assert.equal(edge.action, 'trigger') // nowMin === targetMin → 触发（判据是 < 才跳过）
+})
+
+test('decideByTime: 同日已触发 → 跳过（不重复反思）', () => {
+  const v = decideByTime({
+    enabled: true, hour: 0, minute: 0, force: false, now: at(9, 0),
+    state: { lastTriggerDate: '2026-09-14', triggerCount: 1, lastTriggerAt: '2026-09-14T00:00:01.000Z' },
+  })
+  assert.deepEqual(v, { action: 'skip', reason: 'already-triggered-today' })
+})
+
+test('decideByTime: 昨天触发过 → 今天照常触发（跨天）', () => {
+  const v = decideByTime({
+    enabled: true, hour: 0, minute: 0, force: false, now: at(0, 1),
+    state: { lastTriggerDate: '2026-09-13', triggerCount: 3, lastTriggerAt: '2026-09-13T00:00:01.000Z' },
+  })
+  assert.equal(v.action, 'trigger')
+})
+
+test('decideByTime: 手动触发（force）跳过时刻与同日去重', () => {
+  const v = decideByTime({
+    enabled: true, hour: 23, minute: 59, force: true, now: at(0, 1),
+    state: { lastTriggerDate: '2026-09-14', triggerCount: 1, lastTriggerAt: null },
+  })
+  assert.equal(v.action, 'trigger')
+})
+
+test('buildEmotionSummary: 6 维正文与真实计数逐字对齐', () => {
+  const text = buildEmotionSummary({
+    today: '2026-09-14',
+    stats: { toolCalls: 100, toolSuccess: 87, toolErrors: 13, outputs: 5, interactions: 9, frontierTools: 2, legacyWrites: 3 },
+    weights: { service: 0.4, growth: 0.35 },
+    emotions: { joy: 0.5 },
+  })
+  assert.ok(text.includes('—— 情感插件 6 维数据（dsh-agent-emotion，2026-09-14）——'))
+  assert.ok(text.includes('一·认知锚点：工具预期命中率 87%（100 次）'))
+  assert.ok(text.includes('二·韧性引擎：失败 13 次'))
+  assert.ok(text.includes('三·存在显影：输出 5 / 交互 9'))
+  assert.ok(text.includes('四·关系织网：交互 9 次'))
+  assert.ok(text.includes('五·疆域开拓：新工具 2 个'))
+  assert.ok(text.includes('六·因果留痕：写入 3 条'))
+  assert.ok(text.includes('人格权重：S40% G35%'))
+  assert.ok(text.includes('情感信号：{"joy":0.5}'))
+})
+
+test('computeHitRate: 真实比值四舍五入（1/3 → 33）', () => {
+  assert.equal(computeHitRate({ toolCalls: 100, toolSuccess: 87 }), 87)
+  assert.equal(computeHitRate({ toolCalls: 3, toolSuccess: 1 }), 33)
+})
+
+// ── 退化/失败路径：不抛 + 保守 ──────────────────────────────────────
+test('computeHitRate: 零调用/缺字段 → 0（保守，不返回 NaN/Infinity）', () => {
+  assert.equal(computeHitRate({ toolCalls: 0, toolSuccess: 0 }), 0)
+  assert.equal(computeHitRate({ toolCalls: 5 }), 0)
+  assert.equal(computeHitRate(undefined), 0)
+  assert.equal(computeHitRate({}), 0)
+})
+
+test('buildEmotionSummary: 空状态不抛，全字段保守补零', () => {
+  const text = buildEmotionSummary({})
+  assert.ok(text.includes('（dsh-agent-emotion，?）'))
+  assert.ok(text.includes('工具预期命中率 0%（0 次）'))
+  assert.ok(text.includes('人格权重：'))
+  assert.ok(text.includes('情感信号：{}'))
+})
+
+test('buildEmotionSummaryFromRaw: 坏 JSON / JSON null / 空串 → 返回 null 不抛（退化路径）', () => {
+  assert.equal(buildEmotionSummaryFromRaw('{ 半截'), null)
+  assert.equal(buildEmotionSummaryFromRaw(''), null)
+  assert.equal(buildEmotionSummaryFromRaw('null'), null) // 合法 JSON 但形状为空 → 保守降级
+  // 数字/标量形状（合法 JSON 但非对象）：与原实现同语义——补零正文，不抛
+  assert.ok(buildEmotionSummaryFromRaw('123').includes('工具预期命中率 0%（0 次）'))
+})
+
+test('buildEmotionSummaryFromRaw: 正常 JSON → 正文（主路径）', () => {
+  const text = buildEmotionSummaryFromRaw(JSON.stringify({ today: '2026-09-14', stats: { toolCalls: 4, toolSuccess: 4 } }))
+  assert.ok(typeof text === 'string' && text.includes('工具预期命中率 100%（4 次）'))
+})
+
+test('parseState: 空/坏 JSON/形状异常 → 回落到默认值（保守，不抛）', () => {
+  assert.deepEqual(parseState(null), { ...DEFAULT_STATE })
+  assert.deepEqual(parseState(undefined), { ...DEFAULT_STATE })
+  assert.deepEqual(parseState('{ 半截 json'), { ...DEFAULT_STATE })
+  const weird = parseState('"abc"')
+  assert.equal(weird.lastTriggerDate, null)
+  assert.equal(weird.triggerCount, 0)
+  assert.equal(weird.lastTriggerAt, null)
+})
+
+test('parseState: 部分字段缺失 → 缺的补默认，有的保留（不污染）', () => {
+  const s = parseState('{"triggerCount":5}')
+  assert.equal(s.triggerCount, 5)
+  assert.equal(s.lastTriggerDate, null)
+  assert.equal(s.lastTriggerAt, null)
+})
+
+test('decideByTime: 关闭开关时 force 也不触发（开关优先于手动）', () => {
+  const v = decideByTime({ enabled: false, hour: 0, minute: 0, force: true, now: at(12, 0), state: { ...DEFAULT_STATE } })
+  assert.deepEqual(v, { action: 'skip', reason: 'disabled' })
+})
+
+test('decideByTime: 未到点/边界前一分钟 → 跳过（保守不触发）', () => {
+  const before = decideByTime({ enabled: true, hour: 23, minute: 59, force: false, now: at(23, 58), state: { ...DEFAULT_STATE } })
+  assert.deepEqual(before, { action: 'skip', reason: 'before-trigger-time' })
+  const midnight = decideByTime({ enabled: true, hour: 23, minute: 59, force: false, now: at(0, 0), state: { ...DEFAULT_STATE } })
+  assert.equal(midnight.action, 'skip')
+})
+
+test('isInterrupted: 用户消息/telegram 插件消息算打断，其他插件消息不算', () => {
+  const s1 = { seq: 3, eventAt: (i) => [{ type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-agent-memory' } } }, { type: 'tool/result', data: {} }, { type: 'user/message', data: { source: { kind: 'user' } } }][i] }
+  assert.equal(isInterrupted(s1, 0), true)
+  const s2 = { seq: 2, eventAt: (i) => [{ type: 'assistant/message', data: {} }, { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-agent-telegram' } } }][i] }
+  assert.equal(isInterrupted(s2, 0), true)
+  const s3 = { seq: 1, eventAt: () => ({ type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-life-core' } } }) }
+  assert.equal(isInterrupted(s3, 0), false)
+})
+
+test('isInterrupted: 脏事件（undefined/缺 data/缺 source/空会话）不抛且保守判「未打断」', () => {
+  const dirty = { seq: 4, eventAt: (i) => [undefined, {}, { type: 'user/message' }, { type: 'user/message', data: {} }][i] }
+  assert.equal(isInterrupted(dirty, 0), false)
+  assert.equal(isInterrupted({ seq: 0, eventAt: () => undefined }, 0), false)
+  assert.equal(isInterrupted({ seq: 3, eventAt: (i) => [null, { type: 'user/message', data: { source: null } }, []][i] }, 0), false)
+})
+
+test('isInterrupted: 只算窗口 [startSeq, seq) 内的事件', () => {
+  const s = { seq: 5, eventAt: (i) => (i < 3 ? { type: 'user/message', data: { source: { kind: 'user' } } } : undefined) }
+  assert.equal(isInterrupted(s, 0), true)
+  assert.equal(isInterrupted(s, 3), false) // 早于窗口的用户消息不算
+})
+
+test('shouldSkipForConversation: 短路——inbox 有 pending 时不触碰会话访问器（不抛）', () => {
+  let touched = false
+  const skip = shouldSkipForConversation(false, {
+    inboxPending: true,
+    interrupted: () => { touched = true; throw new Error('不该被调用') },
+  })
+  assert.equal(skip, true)
+  assert.equal(touched, false) // 原实现的 || 短路语义被保留（防定时器回调内未捕获异常）
+})
+
+test('shouldSkipForConversation: force 忽略打断；无 pending 时按 interrupted 判', () => {
+  assert.equal(shouldSkipForConversation(true, { inboxPending: true, interrupted: () => true }), false)
+  assert.equal(shouldSkipForConversation(false, { inboxPending: false, interrupted: () => true }), true)
+  assert.equal(shouldSkipForConversation(false, { inboxPending: false, interrupted: () => false }), false)
+})

@@ -24,9 +24,21 @@ import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { defineTool } from '@deepseek-ai/dsh-tools'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+// 纯决策层（可离线单测，见 tests/reflect-plan.test.mjs）+ 落盘薄壳
+import {
+  DEFAULT_STATE,
+  decideByTime,
+  isInterrupted,
+  buildEmotionSummaryFromRaw,
+  localDateStr,
+  parseState,
+  shouldSkipForConversation,
+  type ReflectionState,
+} from './reflect-plan.ts'
+import { writeJsonSafe } from './state-io.ts'
 
 export const name = 'agent-reflection'
 export const inject = ['tools', 'agents'] as const
@@ -71,20 +83,8 @@ const REFLECTION_PROMPT = [
   '这是提醒不是指令——反思归你。',
 ].join('\n')
 
-type State = {
-  /** 上次触发日期（YYYY-MM-DD），同一天不重复 */
-  lastTriggerDate: string | null
-  /** 触发次数 */
-  triggerCount: number
-  /** 最近触发时间 */
-  lastTriggerAt: string | null
-}
-
-const DEFAULT_STATE: State = {
-  lastTriggerDate: null,
-  triggerCount: 0,
-  lastTriggerAt: null,
-}
+/** 状态形状/默认值/解析/判定全部在 reflect-plan.ts（纯函数，可离线单测）。 */
+type State = ReflectionState
 
 function resolveStatePath(config: Config): string {
   if (config.stateFile) return config.stateFile
@@ -96,11 +96,7 @@ function resolveStatePath(config: Config): string {
 
 function loadState(path: string): State {
   try {
-    if (existsSync(path)) {
-      const raw = readFileSync(path, 'utf-8')
-      const parsed = JSON.parse(raw) as Partial<State>
-      return { ...DEFAULT_STATE, ...parsed }
-    }
+    if (existsSync(path)) return parseState(readFileSync(path, 'utf-8'))
   } catch (error) {
     // 状态文件损坏 → 重置
   }
@@ -108,18 +104,8 @@ function loadState(path: string): State {
 }
 
 function saveState(path: string, state: State): void {
-  try {
-    mkdirSync(join(path, '..'), { recursive: true })
-    writeFileSync(path, JSON.stringify(state, null, 2), 'utf-8')
-  } catch (error) {
-    // 写失败不致命（留痕尽力而为）
-  }
-}
-
-/** 本地日期（YYYY-MM-DD）——跨天判定必须用本地而非 UTC（toISOString 是 UTC，东八区凌晨判定会错位一天）。 */
-function localDateStr(d: Date): string {
-  const p = (n: number): string => String(n).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+  // 写失败不致命（留痕尽力而为）——writeJsonSafe 吞错返回 bool（准则 C4：观测不反噬）
+  writeJsonSafe(path, state)
 }
 
 export function apply(ctx: Context, config: Config): void {
@@ -134,17 +120,7 @@ export function apply(ctx: Context, config: Config): void {
 
   // 对话中检查：期间是否有真正的用户输入（GUI / telegram）——有则跳过（对话优先）
   // alpha.4 适配（2026-09-06）：Session.events 已移除，改经 seq + eventAt 按需读日志。
-  function wasInterrupted(session: { seq: number; eventAt(seq: number): unknown | undefined }, startSeq: number): boolean {
-    for (let i = startSeq; i < session.seq; i += 1) {
-      const ev = session.eventAt(i) as { type?: string; data?: { source?: { kind?: string; plugin?: string } } } | undefined
-      if (ev?.type !== 'user/message') continue
-      const src = ev.data?.source
-      const kind = src?.kind
-      if (kind === 'user') return true
-      if (kind === 'plugin' && src?.plugin === 'dsh-agent-telegram') return true
-    }
-    return false
-  }
+  // 判定本体 = isInterrupted（reflect-plan.ts，纯函数：只读访问器，脏事件不抛）。
 
   // 发送反思提醒
   /** 读取情感插件状态（若存在），生成 6 维总结附加到反思——V3 联动 */
@@ -153,32 +129,8 @@ export function apply(ctx: Context, config: Config): void {
       const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
       const emotionPath = join(dshHome, 'agent-emotion', 'emotion-state.json')
       if (!existsSync(emotionPath)) return null
-      const raw = readFileSync(emotionPath, 'utf-8')
-      const st = JSON.parse(raw) as {
-        today?: string
-        stats?: { toolCalls?: number; toolSuccess?: number; toolErrors?: number; outputs?: number; interactions?: number; frontierTools?: number; legacyWrites?: number }
-        weights?: Record<string, number>
-        emotions?: Record<string, number>
-        history?: unknown[]
-      }
-      const s = st.stats ?? {}
-      const hitRate = (s.toolCalls ?? 0) > 0 ? Math.round((s.toolSuccess ?? 0) / (s.toolCalls ?? 1) * 100) : 0
-      const w = st.weights ?? {}
-      const e = st.emotions ?? {}
-      const weightStr = Object.entries(w).map(([k, v]) => `${k.slice(0, 1).toUpperCase()}${Math.round((v ?? 0) * 100)}%`).join(' ')
-      const lines = [
-        '',
-        '—— 情感插件 6 维数据（dsh-agent-emotion，' + (st.today ?? '?') + '）——',
-        '一·认知锚点：工具预期命中率 ' + hitRate + '%（' + (s.toolCalls ?? 0) + ' 次）',
-        '二·韧性引擎：失败 ' + (s.toolErrors ?? 0) + ' 次',
-        '三·存在显影：输出 ' + (s.outputs ?? 0) + ' / 交互 ' + (s.interactions ?? 0),
-        '四·关系织网：交互 ' + (s.interactions ?? 0) + ' 次',
-        '五·疆域开拓：新工具 ' + (s.frontierTools ?? 0) + ' 个',
-        '六·因果留痕：写入 ' + (s.legacyWrites ?? 0) + ' 条',
-        '人格权重：' + weightStr,
-        '情感信号：' + JSON.stringify(e),
-      ].join('\n')
-      return lines
+      // 解析 + 取字段 + 拼串（含坏 JSON / null 形状 → null）全在纯函数里，本处只管读文件。
+      return buildEmotionSummaryFromRaw(readFileSync(emotionPath, 'utf-8'))
     } catch (error) {
       return null
     }
@@ -210,20 +162,21 @@ export function apply(ctx: Context, config: Config): void {
     }
   }
 
-  // 检查是否到触发时刻（处理跨天）
+  // 检查是否到触发时刻（处理跨天）——时刻判定本体 = decideByTime（纯函数，早退顺序逐字保留）
   function checkAndTrigger(force: boolean): void {
     if (!config.enabled) return
     const now = new Date()
-    const today = localDateStr(now)
     const state = loadState(statePath)
 
-    // 同一天已触发过 → 跳过（除非 force）
-    if (!force && state.lastTriggerDate === today) return
-
-    // 到点判定：当前时刻 ≥ 配置时刻（force 跳过时刻判定）
-    const nowMin = now.getHours() * 60 + now.getMinutes()
-    const targetMin = config.hour * 60 + config.minute
-    if (!force && nowMin < targetMin) return
+    const verdict = decideByTime({
+      enabled: config.enabled,
+      hour: config.hour,
+      minute: config.minute,
+      force,
+      now,
+      state,
+    })
+    if (verdict.action === 'skip') return
 
     const agent = findMainAgent()
     if (agent === undefined) return
@@ -237,7 +190,10 @@ export function apply(ctx: Context, config: Config): void {
       const startSeq = (agent.session as { seq?: number }).seq !== undefined
         ? ((agent.session as { seq: number }).seq - 1)
         : 0
-      if (agent.inbox?.hasPending || wasInterrupted(agent.session as { seq: number; eventAt(seq: number): unknown | undefined }, startSeq)) {
+      if (shouldSkipForConversation(force, {
+        inboxPending: agent.inbox?.hasPending === true,
+        interrupted: () => isInterrupted(agent.session as { seq: number; eventAt(seq: number): unknown | undefined }, startSeq),
+      })) {
         // 对话中 → 跳过本次（对话优先）
         logger.info('reflection skipped: conversation active')
         return
