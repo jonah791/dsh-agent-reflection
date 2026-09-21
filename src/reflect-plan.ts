@@ -145,16 +145,82 @@ export function computeHitRate(stats: EmotionStats | undefined): number {
   return (s.toolCalls ?? 0) > 0 ? Math.round(((s.toolSuccess ?? 0) / (s.toolCalls ?? 1)) * 100) : 0
 }
 
-/** 6 维总结正文（与原实现逐字一致：字段名、分隔符、缺省 '?' 全部照搬）。 */
-export function buildEmotionSummary(st: EmotionStateLoose): string {
-  const s = st.stats ?? {}
+/** 历史快照的宽松形状（跨包不 import emotion 包的类型）。 */
+export interface HistoryEntryLoose {
+  date?: string
+  stats?: EmotionStats
+  weights?: Record<string, number>
+  emotions?: Record<string, number>
+}
+
+/** 快照选取结果：来源（history/today）+ 数据 + 用于标注的日期。 */
+export interface SnapshotPick {
+  source: 'history' | 'today'
+  date: string | undefined
+  stats: EmotionStats | undefined
+  weights: Record<string, number> | undefined
+  emotions: Record<string, number> | undefined
+}
+
+/** 把 history 里的一项收成安全形状：非对象 / 数组 / null / 缺 date 一律 undefined（不抛）。 */
+function toHistoryEntry(v: unknown): HistoryEntryLoose | undefined {
+  if (v === null || typeof v !== 'object' || Array.isArray(v)) return undefined
+  const e = v as HistoryEntryLoose
+  return typeof e.date === 'string' ? e : undefined
+}
+
+/**
+ * 选「被反思的那一天」的快照 —— 2026-09-22 修日界错位（t-d9497d70）。
+ *
+ * **为什么需要**：每日反思在凌晨触发，反思的是**刚结束的那一天**；而 emotion state 的
+ * `today` / `stats` 在 00:00 已翻页到新的一天（此刻全零）⇒ 原实现把「次日零值」当成
+ * 「昨日体检表」，读出「昨天几乎没干活」的假结论（09-21 实际 443 次工具调用）。
+ *
+ * **判据**（纯函数，可证伪）：
+ *   - 给了 `forDate` ⇒ 精确匹配 history 中该 date 的条目；**未命中回落当日**（保守）。
+ *   - 没给 `forDate` ⇒ 取 history 中 **date < today 的最新一条**（＝最近一个已完结的日子）；
+ *     `today` 缺失 / history 为空 / 无更早条目 ⇒ **回落当日**。
+ *   - 脏 history（非数组 / 项非对象 / 缺 date）一律忽略，**不抛**。
+ */
+export function pickSnapshot(st: EmotionStateLoose, forDate?: string): SnapshotPick {
+  const today = typeof st.today === 'string' ? st.today : undefined
+  const entries = (Array.isArray(st.history) ? st.history : [])
+    .map(toHistoryEntry)
+    .filter((e): e is HistoryEntryLoose => e !== undefined)
+  let hit: HistoryEntryLoose | undefined
+  if (forDate !== undefined) {
+    hit = entries.find(e => e.date === forDate)
+  } else if (today !== undefined) {
+    // YYYY-MM-DD 的字典序即日期序；取严格早于今天的**最大**者（不假设数组已排序）
+    const earlier = entries.filter(e => (e.date as string) < today)
+    hit = earlier.reduce<HistoryEntryLoose | undefined>(
+      (best, e) => (best === undefined || (e.date as string) > (best.date as string) ? e : best),
+      undefined,
+    )
+  }
+  if (hit === undefined) {
+    return { source: 'today', date: today, stats: st.stats, weights: st.weights, emotions: st.emotions }
+  }
+  return { source: 'history', date: hit.date, stats: hit.stats, weights: hit.weights, emotions: hit.emotions }
+}
+
+/**
+ * 6 维总结正文（字段名、分隔符、缺省 '?' 与原实现逐字一致）。
+ *
+ * 2026-09-22 改：数据来源由 `pickSnapshot` 决定——默认取「最近一个已完结的日子」，
+ * 跨零点触发不再误报次日零值；显式传 `forDate` 则精确取该日。**标注格式未变**，
+ * 只是它现在真的与被标注的数据同源。
+ */
+export function buildEmotionSummary(st: EmotionStateLoose, forDate?: string): string {
+  const snap = pickSnapshot(st, forDate)
+  const s = snap.stats ?? {}
   const hitRate = computeHitRate(s)
-  const w = st.weights ?? {}
-  const e = st.emotions ?? {}
+  const w = snap.weights ?? {}
+  const e = snap.emotions ?? {}
   const weightStr = Object.entries(w).map(([k, v]) => `${k.slice(0, 1).toUpperCase()}${Math.round((v ?? 0) * 100)}%`).join(' ')
   return [
     '',
-    '—— 情感插件 6 维数据（dsh-agent-emotion，' + (st.today ?? '?') + '）——',
+    '—— 情感插件 6 维数据（dsh-agent-emotion，' + (snap.date ?? '?') + '）——',
     '一·认知锚点：工具预期命中率 ' + hitRate + '%（' + (s.toolCalls ?? 0) + ' 次）',
     '二·韧性引擎：失败 ' + (s.toolErrors ?? 0) + ' 次',
     '三·存在显影：输出 ' + (s.outputs ?? 0) + ' / 交互 ' + (s.interactions ?? 0),
@@ -170,9 +236,9 @@ export function buildEmotionSummary(st: EmotionStateLoose): string {
  * 从状态文件原文生成 6 维总结：坏 JSON / JSON null / 形状异常一律返回 `null`（**不抛**）。
  * 与原实现的 try/catch 边界等价——原来「解析 + 取字段 + 拼串」在同一 try 里，这里同样。
  */
-export function buildEmotionSummaryFromRaw(raw: string): string | null {
+export function buildEmotionSummaryFromRaw(raw: string, forDate?: string): string | null {
   try {
-    return buildEmotionSummary(JSON.parse(raw) as EmotionStateLoose)
+    return buildEmotionSummary(JSON.parse(raw) as EmotionStateLoose, forDate)
   } catch {
     return null
   }

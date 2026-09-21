@@ -16,6 +16,7 @@ import {
   isInterrupted,
   localDateStr,
   parseState,
+  pickSnapshot,
   shouldSkipForConversation,
 } from '../lib/reflect-plan.js'
 
@@ -75,6 +76,74 @@ test('buildEmotionSummary: 6 维正文与真实计数逐字对齐', () => {
   assert.ok(text.includes('六·因果留痕：写入 3 条'))
   assert.ok(text.includes('人格权重：S40% G35%'))
   assert.ok(text.includes('情感信号：{"joy":0.5}'))
+})
+
+// ── 日界错位修复（t-d9497d70 · 2026-09-22）────────────────────────
+// 事故复刻：反思在 09-22 00:00 触发，emotion state 的 today/stats 已翻页为 09-22（全零），
+// 而 09-21 的完整快照躺在 history 里。原实现取 st.stats ⇒ 报「昨天几乎没干活」。
+const CROSS_DAY_STATE = {
+  today: '2026-09-22',
+  stats: { toolCalls: 0, toolSuccess: 0, toolErrors: 0, outputs: 0, interactions: 0, frontierTools: 0, legacyWrites: 0 },
+  weights: { legacy: 0.2 },
+  emotions: {},
+  history: [
+    { date: '2026-09-20', stats: { toolCalls: 1556, outputs: 1251, interactions: 282, legacyWrites: 414, toolErrors: 27 } },
+    { date: '2026-09-21', stats: { toolCalls: 443, outputs: 330, interactions: 137, legacyWrites: 124, toolErrors: 14 }, weights: { legacy: 0.9 }, emotions: { legacy: 0.1 } },
+  ],
+}
+
+test('尸体测试 · 跨零点反思取「已完结日」快照而非次日零值（真实事故样本）', () => {
+  const text = buildEmotionSummary(CROSS_DAY_STATE)
+  assert.ok(text.includes('—— 情感插件 6 维数据（dsh-agent-emotion，2026-09-21）——'), '标注日期应为已完结日')
+  assert.ok(!text.includes('2026-09-22'), '不得再出现次日日期')
+  assert.ok(text.includes('工具预期命中率 0%（443 次）'), '应取 09-21 的 443 次（toolSuccess 缺 ⇒ 命中率 0，保守）')
+  assert.ok(text.includes('三·存在显影：输出 330 / 交互 137'))
+  assert.ok(text.includes('六·因果留痕：写入 124 条'))
+  assert.ok(text.includes('二·韧性引擎：失败 14 次'))
+  assert.ok(text.includes('人格权重：L90%'), '权重同样取快照，不与当日混用')
+  assert.ok(text.includes('情感信号：{"legacy":0.1}'))
+})
+
+test('pickSnapshot: 未给 forDate ⇒ 取 date < today 的最新一条（不假设数组已排序）', () => {
+  const shuffled = { today: '2026-09-22', stats: { toolCalls: 1 }, history: [
+    { date: '2026-09-21', stats: { toolCalls: 443 } },
+    { date: '2026-09-11', stats: { toolCalls: 991 } },
+    { date: '2026-09-20', stats: { toolCalls: 1556 } },
+  ] }
+  const p = pickSnapshot(shuffled)
+  assert.equal(p.source, 'history')
+  assert.equal(p.date, '2026-09-21')
+  assert.equal(p.stats.toolCalls, 443)
+})
+
+test('pickSnapshot: 显式 forDate ⇒ 精确命中；未命中回落当日（保守）', () => {
+  const p = pickSnapshot(CROSS_DAY_STATE, '2026-09-20')
+  assert.equal(p.date, '2026-09-20')
+  assert.equal(p.stats.toolCalls, 1556)
+  const miss = pickSnapshot(CROSS_DAY_STATE, '2026-01-01')
+  assert.equal(miss.source, 'today')
+  assert.equal(miss.date, '2026-09-22')
+  assert.equal(miss.stats.toolCalls, 0)
+})
+
+test('pickSnapshot: 无 history / today 缺失 / 脏项 ⇒ 一律回落当日且不抛', () => {
+  const noHist = pickSnapshot({ today: '2026-09-22', stats: { toolCalls: 7 } })
+  assert.equal(noHist.source, 'today')
+  assert.equal(noHist.stats.toolCalls, 7)
+  // today 缺失 ⇒ 无从判「更早」，保守用当日
+  assert.equal(pickSnapshot({ history: [{ date: '2026-09-21', stats: { toolCalls: 443 } }] }).source, 'today')
+  // 脏 history：null 项 / 标量 / 数组 / 缺 date / 非数组
+  const dirty = { today: '2026-09-22', stats: { toolCalls: 2 }, history: [null, 42, [], { stats: {} }, 'x'] }
+  const p = pickSnapshot(dirty)
+  assert.equal(p.source, 'today')
+  assert.equal(p.stats.toolCalls, 2)
+  assert.equal(pickSnapshot({ today: '2026-09-22', history: 'not-an-array' }).source, 'today')
+})
+
+test('buildEmotionSummaryFromRaw: forDate 可透传（跨包读原始文件的调用路径）', () => {
+  const raw = JSON.stringify(CROSS_DAY_STATE)
+  assert.ok(buildEmotionSummaryFromRaw(raw).includes('2026-09-21'))
+  assert.ok(buildEmotionSummaryFromRaw(raw, '2026-09-20').includes('2026-09-20'))
 })
 
 test('computeHitRate: 真实比值四舍五入（1/3 → 33）', () => {
