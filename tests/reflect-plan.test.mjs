@@ -17,6 +17,8 @@ import {
   localDateStr,
   parseState,
   pickSnapshot,
+  buildReflectionPrompt,
+  toTitleDate,
   shouldSkipForConversation,
 } from '../lib/reflect-plan.js'
 
@@ -229,6 +231,42 @@ test('isInterrupted: 只算窗口 [startSeq, seq) 内的事件', () => {
   const s = { seq: 5, eventAt: (i) => (i < 3 ? { type: 'user/message', data: { source: { kind: 'user' } } } : undefined) }
   assert.equal(isInterrupted(s, 0), true)
   assert.equal(isInterrupted(s, 3), false) // 早于窗口的用户消息不算
+})
+
+// ── 标题日期与数据同源（t-d9497d70 第二处 · 2026-09-22）────────────
+const R_MARK = '【每日反思】'
+
+test('尸体测试 · 标题日期取「被反思的那一天」，不是模块加载日/发送日', () => {
+  // 事故样本：web 在 09-21 启动、09-22 才发反思。原实现把 `new Date()` 写在**模块级常量**里
+  // ⇒ 日期在模块加载那一刻冻结 ⇒ 标题写 09-21（启动日），数据块写 09-22——两处各说各话。
+  const p = buildReflectionPrompt(R_MARK, '2026-09-21', new Date(2026, 8, 22, 0, 1))
+  assert.ok(p.startsWith('【每日反思】（2026/9/21）'), '标题应取被反思日')
+  assert.ok(!p.includes('（2026/9/22）'), '不得取发送日')
+})
+
+test('toTitleDate: YYYY-MM-DD → YYYY/M/D（月日不补零）；异常输入回落本地日期', () => {
+  assert.equal(toTitleDate('2026-09-21'), '2026/9/21')
+  assert.equal(toTitleDate('2026-01-05'), '2026/1/5')
+  const fallback = new Date(2026, 8, 22).toLocaleDateString('zh-CN')
+  assert.equal(toTitleDate(undefined, new Date(2026, 8, 22)), fallback, '缺失 ⇒ 回落')
+  assert.equal(toTitleDate('not-a-date', new Date(2026, 8, 22)), fallback, '非日期串 ⇒ 回落')
+  assert.equal(toTitleDate('2026-9-21', new Date(2026, 8, 22)), fallback, '形状严格：不补零的输入不被接受')
+})
+
+test('buildReflectionPrompt: 6 问与说明逐字保留（重构不得让正文漂移）', () => {
+  const p = buildReflectionPrompt(R_MARK, '2026-09-21')
+  assert.ok(p.includes('这是今天的每日反思提醒。请结合这一天的记忆，按 6 维进化棱镜自审：'))
+  assert.ok(p.includes('侧面一·认知锚点') && p.includes('侧面六·因果留痕'))
+  assert.ok(p.includes('反思方式由你决定'))
+  assert.ok(p.includes('这是提醒不是指令——反思归你。'))
+  assert.equal(p.split('\n').length, 12, '正文行数固定：标题1 + 引言1 + 空1 + 6问 + 空1 + 说明2')
+})
+
+test('标题与 6 维块同源：同一个 pickSnapshot.date 喂两者 ⇒ 日期一致', () => {
+  const date = pickSnapshot(CROSS_DAY_STATE).date
+  assert.equal(date, '2026-09-21')
+  assert.ok(buildReflectionPrompt(R_MARK, date).includes('（2026/9/21）'))
+  assert.ok(buildEmotionSummary(CROSS_DAY_STATE).includes('（dsh-agent-emotion，2026-09-21）'))
 })
 
 test('shouldSkipForConversation: 短路——inbox 有 pending 时不触碰会话访问器（不抛）', () => {

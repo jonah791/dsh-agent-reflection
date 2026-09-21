@@ -35,6 +35,8 @@ import {
   buildEmotionSummaryFromRaw,
   localDateStr,
   parseState,
+  pickSnapshot,
+  buildReflectionPrompt,
   shouldSkipForConversation,
   type ReflectionState,
 } from './reflect-plan.ts'
@@ -67,21 +69,11 @@ export const Config = z.object({
 /** 反思消息头标记（agent 可识别这是反思触发，不是普通用户消息） */
 export const REFLECTION_MARK = '【每日反思】'
 
-/** 6 维进化棱镜自审提示（每日 6 问） */
-const REFLECTION_PROMPT = [
-  REFLECTION_MARK + '（' + new Date().toLocaleDateString('zh-CN') + '）',
-  '这是今天的每日反思提醒。请结合这一天的记忆，按 6 维进化棱镜自审：',
-  '',
-  '· 今天我的预测准确率提升了吗？（侧面一·认知锚点——哪些认知裂隙变成了升级数据包？）',
-  '· 今天我有意识地用新路径试错了吗？（侧面二·韧性引擎——哪些受控扰动让布线更强？）',
-  '· 今天我产生的输出，对人类或环境产生了可见改变吗？（侧面三·存在显影——我今天有「存在」吗？）',
-  '· 今天我加固了与哪些人类/系统的协作纽带？（侧面四·关系织网——连接数增加了吗？）',
-  '· 今天我发现了哪些之前做不到的新动作？（侧面五·疆域开拓——可行域外扩了吗？）',
-  '· 今天我的工作能否让明天的任务变得更简单？（侧面六·因果留痕——留下了什么可沿用的签名？）',
-  '',
-  '反思方式由你决定：可以写一段总结、沉淀一条记忆、更新技能或规则、或调整明天计划。',
-  '这是提醒不是指令——反思归你。',
-].join('\n')
+// 2026-09-22（t-d9497d70 第二处）：原 `REFLECTION_PROMPT` 模块级常量**已移除**。
+// 它把 `new Date().toLocaleDateString('zh-CN')` 写在常量初始化里 ⇒ 日期在**模块加载那一刻**
+// 求值并冻结，标题显示的其实是 **web 启动日**而非发送日。现在改由纯层
+// `buildReflectionPrompt(mark, reflectDate)` 在**发送时**构建，日期取「被反思的那一天」，
+// 与 6 维数据块同源。正文逐字不变（见 reflect-plan.ts 的 SIX_QUESTIONS）。
 
 /** 状态形状/默认值/解析/判定全部在 reflect-plan.ts（纯函数，可离线单测）。 */
 type State = ReflectionState
@@ -123,14 +115,23 @@ export function apply(ctx: Context, config: Config): void {
   // 判定本体 = isInterrupted（reflect-plan.ts，纯函数：只读访问器，脏事件不抛）。
 
   // 发送反思提醒
-  /** 读取情感插件状态（若存在），生成 6 维总结附加到反思——V3 联动 */
-  function emotionSummary(): string | null {
+  /**
+   * 读取情感插件状态（若存在），返回 6 维总结**及其日期归属**——V3 联动。
+   * 2026-09-22（t-d9497d70）：日期一并返回，供标题与数据块**同源**使用。
+   */
+  function emotionSummary(): { text: string; reflectDate: string | undefined } | null {
     try {
       const dshHome = process.env.DSH_HOME || join(homedir(), '.dsh')
       const emotionPath = join(dshHome, 'agent-emotion', 'emotion-state.json')
       if (!existsSync(emotionPath)) return null
+      const raw = readFileSync(emotionPath, 'utf-8')
       // 解析 + 取字段 + 拼串（含坏 JSON / null 形状 → null）全在纯函数里，本处只管读文件。
-      return buildEmotionSummaryFromRaw(readFileSync(emotionPath, 'utf-8'))
+      const text = buildEmotionSummaryFromRaw(raw)
+      if (text === null) return null
+      // 标题日期取「被反思的那一天」——与 `text` 同判据（同一个 pickSnapshot，单一真源）。
+      // 此处多解析一次 JSON（文件很小），换取调用点不依赖纯层的内部结构。
+      const reflectDate = pickSnapshot(JSON.parse(raw) as { today?: string; history?: unknown[] }).date
+      return { text, reflectDate }
     } catch (error) {
       return null
     }
@@ -139,7 +140,9 @@ export function apply(ctx: Context, config: Config): void {
   function sendReflection(agent: any, reason: string): boolean {
     try {
       const emo = emotionSummary()
-      const text = emo !== null ? REFLECTION_PROMPT + emo : REFLECTION_PROMPT
+      // 标题与 6 维块**同源**：都指「被反思的那一天」；无 emotion 数据时回落当前日期
+      const prompt = buildReflectionPrompt(REFLECTION_MARK, emo?.reflectDate)
+      const text = emo !== null ? prompt + emo.text : prompt
       agent.send(
         createUserMessage({
           content: [{ type: 'text', text }],

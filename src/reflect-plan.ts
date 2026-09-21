@@ -243,3 +243,47 @@ export function buildEmotionSummaryFromRaw(raw: string, forDate?: string): strin
     return null
   }
 }
+
+/**
+ * `YYYY-MM-DD` → `YYYY/M/D`（反思标题的显示格式，与历史一致：月/日**不补零**）。
+ * 输入缺失 / 形状异常 ⇒ 回落 `now` 的本地日期串（`zh-CN`，与旧实现同格式）。纯函数。
+ */
+export function toTitleDate(isoDate: string | undefined, now: Date = new Date()): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(isoDate ?? '')
+  if (m === null) return now.toLocaleDateString('zh-CN')
+  return `${m[1]}/${Number(m[2])}/${Number(m[3])}`
+}
+
+/** 6 维进化棱镜的 6 问（正文，与历史逐字一致）。 */
+const SIX_QUESTIONS = [
+  '· 今天我的预测准确率提升了吗？（侧面一·认知锚点——哪些认知裂隙变成了升级数据包？）',
+  '· 今天我有意识地用新路径试错了吗？（侧面二·韧性引擎——哪些受控扰动让布线更强？）',
+  '· 今天我产生的输出，对人类或环境产生了可见改变吗？（侧面三·存在显影——我今天有「存在」吗？）',
+  '· 今天我加固了与哪些人类/系统的协作纽带？（侧面四·关系织网——连接数增加了吗？）',
+  '· 今天我发现了哪些之前做不到的新动作？（侧面五·疆域开拓——可行域外扩了吗？）',
+  '· 今天我的工作能否让明天的任务变得更简单？（侧面六·因果留痕——留下了什么可沿用的签名？）',
+]
+
+/**
+ * 反思提醒正文（2026-09-22 修 t-d9497d70 第二处）。
+ *
+ * **为什么必须是函数**：原实现把它做成**模块级常量**，标题里的 `new Date()` 在**模块加载那一刻**
+ * 求值并冻结 ⇒ web 09-21 启动、09-22 才发反思时标题仍写 09-21——**标题显示的是启动日，不是发送日**
+ * （这正是「标题 09-21 / 数据块 09-22」错位的另一半成因）。改为**发送时求值**，且日期取
+ * 「**被反思的那一天**」——与 6 维数据块**同源**（都来自 `pickSnapshot`），标题与数据从此不可能
+ * 再各说各话。
+ *
+ * @param mark 反思标记（`REFLECTION_MARK`，由调用方传入以保持单一真源）
+ * @param reflectDate 被反思的那一天（`YYYY-MM-DD`；缺失则回落当前日期）
+ */
+export function buildReflectionPrompt(mark: string, reflectDate: string | undefined, now: Date = new Date()): string {
+  return [
+    mark + '（' + toTitleDate(reflectDate, now) + '）',
+    '这是今天的每日反思提醒。请结合这一天的记忆，按 6 维进化棱镜自审：',
+    '',
+    ...SIX_QUESTIONS,
+    '',
+    '反思方式由你决定：可以写一段总结、沉淀一条记忆、更新技能或规则、或调整明天计划。',
+    '这是提醒不是指令——反思归你。',
+  ].join('\n')
+}
