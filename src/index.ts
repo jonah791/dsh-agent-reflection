@@ -42,6 +42,12 @@ import {
 } from './reflect-plan.ts'
 import { writeJsonSafe } from './state-io.ts'
 
+declare module '@deepseek-ai/dsh-llm' {
+  interface MessageSourceMap {
+    'dsh-agent-reflection': { kind: 'dsh-agent-reflection' }
+  }
+}
+
 export const name = 'agent-reflection'
 export const inject = ['tools', 'agents'] as const
 
@@ -146,7 +152,7 @@ export function apply(ctx: Context, config: Config): void {
       agent.send(
         createUserMessage({
           content: [{ type: 'text', text }],
-          source: { kind: 'plugin', plugin: 'dsh-agent-reflection' },
+          source: { kind: 'dsh-agent-reflection' },
         }),
         'next-turn',
         true,
