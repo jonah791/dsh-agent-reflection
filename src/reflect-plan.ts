@@ -101,7 +101,7 @@ export function isInterrupted(session: SessionLike, startSeq: number): boolean {
     const src = ev.data?.source
     const kind = src?.kind
     if (kind === 'user') return true
-    if (kind === 'plugin' && src?.plugin === 'dsh-agent-telegram') return true
+    if (kind === 'dsh-agent-telegram') return true
   }
   return false
 }

@@ -212,12 +212,18 @@ test('decideByTime: 未到点/边界前一分钟 → 跳过（保守不触发）
 })
 
 test('isInterrupted: 用户消息/telegram 插件消息算打断，其他插件消息不算', () => {
-  const s1 = { seq: 3, eventAt: (i) => [{ type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-agent-memory' } } }, { type: 'tool/result', data: {} }, { type: 'user/message', data: { source: { kind: 'user' } } }][i] }
+  const s1 = { seq: 3, eventAt: (i) => [{ type: 'user/message', data: { source: { kind: 'dsh-agent-memory' } } }, { type: 'tool/result', data: {} }, { type: 'user/message', data: { source: { kind: 'user' } } }][i] }
   assert.equal(isInterrupted(s1, 0), true)
-  const s2 = { seq: 2, eventAt: (i) => [{ type: 'assistant/message', data: {} }, { type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-agent-telegram' } } }][i] }
+  // 0.1.7：生产者按自身 kind 声明来源（dsh-agent-telegram 现发 kind:'dsh-agent-telegram'）
+  const s2 = { seq: 2, eventAt: (i) => [{ type: 'assistant/message', data: {} }, { type: 'user/message', data: { source: { kind: 'dsh-agent-telegram' } } }][i] }
   assert.equal(isInterrupted(s2, 0), true)
-  const s3 = { seq: 1, eventAt: () => ({ type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-life-core' } } }) }
+  const s3 = { seq: 1, eventAt: () => ({ type: 'user/message', data: { source: { kind: 'dsh-life-core' } } }) }
   assert.equal(isInterrupted(s3, 0), false)
+})
+
+test('尸体样本：v3 形状（kind=plugin + plugin=dsh-agent-telegram）**不**算打断——0.1.7 已移除该 source 形状', () => {
+  const v3 = { seq: 1, eventAt: () => ({ type: 'user/message', data: { source: { kind: 'plugin', plugin: 'dsh-agent-telegram' } } }) }
+  assert.equal(isInterrupted(v3, 0), false)
 })
 
 test('isInterrupted: 脏事件（undefined/缺 data/缺 source/空会话）不抛且保守判「未打断」', () => {
