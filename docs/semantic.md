@@ -197,6 +197,7 @@
 - **只修一处的中间态实测（关键证据）**：标题 `09-22` / 数据 `09-21` ⇒ 仍不一致，证明这两处是**独立缺陷**，修一处不够。
 - 修法：抽出 `pickSnapshot`（取最近**已完结**日）+ `toTitleDate` + `buildReflectionPrompt`（标题与数据**同取** `pickSnapshot().date`），删掉模块级常量 `REFLECTION_PROMPT`；`emotionSummary()` 改为返回日期。判据：真实报文三阶段对比 `09-21 / 09-22 零值` → `09-22 / 09-21` → **`09-21 / 09-21` ✓**；测试 30 → 34 项全绿。commit `265813a` + `91f895a`。
 - 教训：**「模块级常量 / 默认参数里的 `new Date()`」是隐藏的时间冻结点**——凡是输出里出现日期，都要问一句：这个日期是**取数时刻**算的，还是**模块加载时刻**算的？（AGENTS.md §5.9 规则 6「读数必须自带范围标注」的时间维度实例。）
+- **2026-09-28 D3 复核（0.1.7 平台适配波次 · 判为假报）**：触发提交 `4133c71`「fix(0.1.7): MessageSourceMap.plugin 已移除 ⇒ 生产者改自声明 source kind」。逐行对读（+7/−1）确认仅两处：新增 `declare module` 的 `MessageSourceMap` 声明、一处 `source: { kind: 'plugin', plugin: 'dsh-agent-reflection' }` → `{ kind: 'dsh-agent-reflection' }`。**定时 / 手动触发语义与 §7 验收表未被触及** ⇒ 不为消警而改内容。复核方式：`git -C self-plugins/dsh-agent-reflection show 4133c71`。
 
 ## 10 · 未决问题
 
