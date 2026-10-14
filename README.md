@@ -14,7 +14,7 @@
   <a href="https://github.com/jonah791/dsh-agent-reflection"><img src="https://img.shields.io/badge/version-0.1.1-blue" alt="version"></a>
   <img src="https://img.shields.io/badge/License-MIT-green" alt="license">
   <img src="https://img.shields.io/badge/TypeScript-3178C6" alt="TypeScript">
-  <img src="https://img.shields.io/badge/tests-25%20passed-brightgreen" alt="tests">
+  <img src="https://img.shields.io/badge/tests-40%20passed-brightgreen" alt="tests">
 </p>
 
 **一句话**：每天一次的**心智检视提醒**——到点向主 agent 发一条带 `【每日反思】` 标记的消息，附上当日情感 6 维数据，引导按「6 维进化棱镜」自审。
