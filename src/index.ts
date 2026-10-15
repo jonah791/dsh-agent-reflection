@@ -36,6 +36,7 @@ import {
   localDateStr,
   parseState,
   pickSnapshot,
+  resolveForDate,
   buildReflectionPrompt,
   shouldSkipForConversation,
   type ReflectionState,
@@ -131,12 +132,22 @@ export function apply(ctx: Context, config: Config): void {
       const emotionPath = join(dshHome, 'agent-emotion', 'emotion-state.json')
       if (!existsSync(emotionPath)) return null
       const raw = readFileSync(emotionPath, 'utf-8')
+      // 2026-09-30 修日界竞态：反思在 00:00 触发时，emotion 的 `today` **尚未翻页**——它的翻页
+      // 发生在「新一天的第一个事件」上（emotion `engine.ts` 只在事件里比较 localDate），而 00:00
+      // 那一刻新一天还没有事件。于是 `st.today` 仍是**刚结束的那一天**，而 `pickSnapshot` 的默认
+      // 逻辑（取 `date < st.today` 的最新）会退到**前天**（实测：09-30 00:00:24 的反思写成了 09-28）。
+      // 判据（两种情形都要得到「刚结束的那一天」）：
+      //   · `st.today !== 本地今天` ⇒ 未翻页 ⇒ 传 `st.today`（精确匹配 history；未命中时
+      //     `pickSnapshot` 回落当日 = `date: st.today` + **未翻页的完整 stats**，正是那一天）✓
+      //   · `st.today === 本地今天` ⇒ 已翻页 ⇒ 不传（走默认：取 history 最新）✓
+      const parsed = JSON.parse(raw) as { today?: string; history?: unknown[] } | null
+      const forDate = resolveForDate(parsed?.today, localDateStr(new Date()))
       // 解析 + 取字段 + 拼串（含坏 JSON / null 形状 → null）全在纯函数里，本处只管读文件。
-      const text = buildEmotionSummaryFromRaw(raw)
+      const text = buildEmotionSummaryFromRaw(raw, forDate)
       if (text === null) return null
-      // 标题日期取「被反思的那一天」——与 `text` 同判据（同一个 pickSnapshot，单一真源）。
-      // 此处多解析一次 JSON（文件很小），换取调用点不依赖纯层的内部结构。
-      const reflectDate = pickSnapshot(JSON.parse(raw) as { today?: string; history?: unknown[] }).date
+      // 标题日期取「被反思的那一天」——与 `text` 同判据（同一个 pickSnapshot + 同一个 forDate），
+      // 单一真源。此处多解析一次 JSON（文件很小），换取调用点不依赖纯层的内部结构。
+      const reflectDate = pickSnapshot(parsed as { today?: string; history?: unknown[] }, forDate).date
       return { text, reflectDate }
     } catch (error) {
       return null

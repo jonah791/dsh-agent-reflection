@@ -205,6 +205,27 @@ export function pickSnapshot(st: EmotionStateLoose, forDate?: string): SnapshotP
 }
 
 /**
+ * 解析「刚结束的那一天」该以哪个日期去查快照 —— 修 **2026-09-30 的日界竞态**。
+ *
+ * **缺陷形状**：反思在 00:00 触发，而 emotion 的 `state.today` 要到「新一天的第一个事件」才翻页
+ * （emotion `engine.ts` 在事件回调里比较 `localDate`）。⇒ 00:00 那一刻 `st.today` 仍是**刚结束
+ * 的那一天**，而 `pickSnapshot` 的默认逻辑（取 `date < today` 的最新）会退到**前天**。
+ * 实测：09-30 00:00:24 的反思把「09-29 那一天」写成了 `2026-09-28`（而 00:01:58 再读，同一份
+ * 文件已是 09-30 / history 最新 09-29 —— **同一数据两个时刻两个答案**，这就是竞态的指纹）。
+ *
+ * **判据**（两种情形都必须得到「刚结束的那一天」）：
+ *   · `stToday !== localToday` ⇒ **未翻页** ⇒ 返回 `stToday`：`pickSnapshot` 精确匹配 history；
+ *     未命中时回落当日（`date: stToday` + **未翻页的完整 stats**，正是那一天）✓
+ *   · `stToday === localToday` ⇒ **已翻页** ⇒ 返回 `undefined`：交回默认逻辑取 history 最新 ✓
+ *   · 非字符串 / 缺失 ⇒ `undefined`（保守，与原行为一致）
+ */
+export function resolveForDate(stToday: unknown, localToday: string): string | undefined {
+  // `''` 是 emotion 状态的初值（`DEFAULT_STATE.today`）⇒ 必须与「缺失」同待，
+  // 否则会把空串当日期传进 `pickSnapshot`（精确匹配必失败 ⇒ 回落当日，dates 为空 ⇒ 标题 `?`）。
+  return typeof stToday === 'string' && stToday !== '' && stToday !== localToday ? stToday : undefined
+}
+
+/**
  * 6 维总结正文（字段名、分隔符、缺省 '?' 与原实现逐字一致）。
  *
  * 2026-09-22 改：数据来源由 `pickSnapshot` 决定——默认取「最近一个已完结的日子」，

@@ -17,6 +17,7 @@ import {
   localDateStr,
   parseState,
   pickSnapshot,
+  resolveForDate,
   buildReflectionPrompt,
   toTitleDate,
   shouldSkipForConversation,
@@ -289,4 +290,57 @@ test('shouldSkipForConversation: force 忽略打断；无 pending 时按 interru
   assert.equal(shouldSkipForConversation(true, { inboxPending: true, interrupted: () => true }), false)
   assert.equal(shouldSkipForConversation(false, { inboxPending: false, interrupted: () => true }), true)
   assert.equal(shouldSkipForConversation(false, { inboxPending: false, interrupted: () => false }), false)
+})
+
+// ── resolveForDate：日界竞态（2026-09-30 修；现场读数取自真实事故）──────────────
+// 缺陷形状：反思 00:00 触发，而 emotion 的 today 要到「新一天第一个事件」才翻页 ⇒
+// 那一刻 st.today 仍是「刚结束的那一天」，而默认逻辑取 `date < today` 的最新 ⇒ 退到前天。
+
+test('resolveForDate: 未翻页 ⇒ 返回 st.today（它就是「刚结束的那一天」）', () => {
+  // 真实现场：09-30 00:00:24 触发反思时 emotion 的 today 仍停在 09-29（新一天还没有事件）
+  assert.equal(resolveForDate('2026-09-29', '2026-09-30'), '2026-09-29')
+})
+
+test('resolveForDate: 已翻页 ⇒ undefined（交回默认逻辑取 history 最新）', () => {
+  // 09-30 已有事件后：today=09-30、history 最新=09-29 ⇒ 走原默认路径即正确
+  assert.equal(resolveForDate('2026-09-30', '2026-09-30'), undefined)
+})
+
+test('resolveForDate: 空串/缺失/非字符串 ⇒ undefined（emotion 初值 today 就是空串）', () => {
+  assert.equal(resolveForDate('', '2026-09-30'), undefined)
+  assert.equal(resolveForDate(undefined, '2026-09-30'), undefined)
+  assert.equal(resolveForDate(null, '2026-09-30'), undefined)
+  assert.equal(resolveForDate(20260929, '2026-09-30'), undefined)
+})
+
+test('端到端：未翻页竞态下 pickSnapshot(forDate=resolveForDate(...)) 给出正确的那一天', () => {
+  // 未翻页状态：today=09-29（新一天无事件）；history 最新为 09-28
+  const stats = { toolCalls: 446, toolErrors: 9, interactions: 471, outputs: 343, legacyWrites: 60, frontierTools: 64 }
+  const stale = {
+    today: '2026-09-29',
+    stats,
+    history: [{ date: '2026-09-28', stats: { toolCalls: 1259 }, weights: {}, emotions: {} }],
+  }
+  // 旧路径（不传 forDate）：退到前天 —— 正是那次事故（标题写成 2026/9/28）
+  assert.equal(pickSnapshot(stale).date, '2026-09-28')
+  // 新路径：未命中 history ⇒ 回落当日；日期 = 09-29，且 stats 是那一天的完整统计
+  const forDate = resolveForDate(stale.today, '2026-09-30')
+  const snap = pickSnapshot(stale, forDate)
+  assert.equal(snap.date, '2026-09-29')
+  assert.equal(snap.stats.toolCalls, 446)
+  assert.equal(snap.source, 'today')
+})
+
+test('端到端：已翻页时两条路径同解（不引入回归）', () => {
+  const rolled = {
+    today: '2026-09-30',
+    stats: { toolCalls: 5 },
+    history: [
+      { date: '2026-09-28', stats: { toolCalls: 1259 }, weights: {}, emotions: {} },
+      { date: '2026-09-29', stats: { toolCalls: 446 }, weights: {}, emotions: {} },
+    ],
+  }
+  assert.equal(resolveForDate(rolled.today, '2026-09-30'), undefined)
+  assert.equal(pickSnapshot(rolled).date, '2026-09-29')
+  assert.equal(pickSnapshot(rolled, resolveForDate(rolled.today, '2026-09-30')).date, '2026-09-29')
 })
