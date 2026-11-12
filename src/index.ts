@@ -235,6 +235,7 @@ export function apply(ctx: Context, config: Config): void {
   // ---------- 工具：reflection_config（查看/设置反思时间） ----------
   ctx.tools.register(defineTool({
     name: 'reflection_config',
+    deferLoading: true,
     description: '每日反思插件的配置查看/设置（触发时刻/开关/状态）。get=查看 / set=设置触发时刻 / trigger=手动触发一次反思',
     parameters: {
       action: { type: 'string', description: 'get=查看（默认） / set=设置触发时刻 / trigger=手动触发一次反思' },
